@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Dialogs
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -24,37 +25,55 @@ BarWidget {
   property var draftDays: []
   property int draftWeeklyDay: -1
   property string formErrorText: ""
+  property string transferMode: ""
+  property string transferPath: ""
+  property string transferMessage: ""
+  property string transferPayload: ""
+  property bool exportStarted: false
   readonly property string stateFilePath: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/recurring-task-reminder/tasks.json"
   readonly property int dueCount: tasks.filter(function(task) { return Number(task.dueAt) <= root.clockNow }).length
 
   Commons.Translations { id: strings; directory: Qt.resolvedUrl("i18n") }
 
+  function validateTaskList(items) {
+    if (!Array.isArray(items) || items.length > 500) return "invalid task list size"
+    var ids = ({})
+    for (var i = 0; i < items.length; i++) {
+      var task = items[i]
+      if (!task || typeof task.id !== "string" || task.id.length === 0 || task.id.length > 100 || ids[task.id]
+          || typeof task.title !== "string" || task.title.length === 0 || task.title.length > 120
+          || !["once", "days", "interval", "weekly", "monthly"].includes(task.mode)
+          || !Array.isArray(task.days) || task.days.length > 7
+          || !Number.isInteger(Number(task.dueAt)) || task.dueAt <= 0 || task.dueAt > 8640000000000000
+          || !Number.isInteger(task.hour) || task.hour < 0 || task.hour > 23
+          || !Number.isInteger(task.minute) || task.minute < 0 || task.minute > 59
+          || !Number.isInteger(task.monthDay) || (task.mode === "monthly" && (task.monthDay < 1 || task.monthDay > 31))
+          || !Number.isInteger(task.repeatMinutes) || task.repeatMinutes < 0 || task.repeatMinutes > 10080
+          || !Number.isFinite(Number(task.lastNotifiedAt)) || task.lastNotifiedAt < 0
+          || (task.mode === "days" && task.days.length === 0)
+          || (task.mode === "weekly" && task.days.length !== 1)
+          || (task.mode === "interval" && (!Number.isInteger(task.intervalDays) || task.intervalDays < 1 || task.intervalDays > 3650))
+          || task.days.some(function(day) { return !Number.isInteger(day) || day < 0 || day > 6 }))
+        return "invalid task entry"
+      for (var d = 0; d < task.days.length; d++) {
+        if (task.days.indexOf(task.days[d]) !== d) return "duplicate weekday"
+      }
+      ids[task.id] = true
+      if (task.mode === "interval" || task.mode === "once") {
+        if (!task.startDate) task.startDate = dateInput(new Date(task.dueAt))
+        if (!parseStartDate(task.startDate)) return "invalid start date"
+      }
+    }
+    return ""
+  }
+
   function parseState(raw) {
     try {
       var parsed = JSON.parse(raw || "{\"version\":1,\"tasks\":[]}")
-      if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.tasks) || parsed.tasks.length > 500)
+      if (!parsed || parsed.version !== 1)
         throw new Error("Unsupported task reminder state")
-      for (var i = 0; i < parsed.tasks.length; i++) {
-        var task = parsed.tasks[i]
-        if (!task || typeof task.id !== "string" || typeof task.title !== "string"
-            || !["days", "interval", "weekly", "monthly"].includes(task.mode)
-            || !Array.isArray(task.days) || !Number.isFinite(Number(task.dueAt))
-            || !Number.isFinite(Number(task.hour)) || task.hour < 0 || task.hour > 23
-            || !Number.isFinite(Number(task.minute)) || task.minute < 0 || task.minute > 59
-            || !Number.isFinite(Number(task.monthDay)) || task.monthDay < 1 || task.monthDay > 31
-            || !Number.isFinite(Number(task.repeatMinutes)) || task.repeatMinutes < 0 || task.repeatMinutes > 10080
-            || !Number.isFinite(Number(task.lastNotifiedAt)) || task.id.length > 100
-            || task.title.length === 0 || task.title.length > 120
-            || (task.mode === "days" && task.days.length === 0)
-            || (task.mode === "weekly" && task.days.length !== 1)
-            || (task.mode === "interval" && (!Number.isInteger(task.intervalDays) || task.intervalDays < 1 || task.intervalDays > 3650))
-            || task.days.some(function(day) { return !Number.isInteger(day) || day < 0 || day > 6 }))
-          throw new Error("Invalid task reminder entry")
-        if (task.mode === "interval") {
-          if (!task.startDate) task.startDate = dateInput(new Date(Number(task.dueAt)))
-          if (!parseStartDate(task.startDate)) throw new Error("Invalid interval start date")
-        }
-      }
+      var issue = validateTaskList(parsed.tasks)
+      if (issue) throw new Error(issue)
       tasks = parsed.tasks
       stateReady = true
       stateError = false
@@ -194,6 +213,7 @@ BarWidget {
     for (var i = 0; i < tasks.length; i++) {
       var task = tasks[i]
       if (task.id !== id) { next.push(task); continue }
+      if (task.mode === "once") continue
       var dueAt = nextDate(task, Number(task.dueAt))
       if (dueAt > 0) {
         task.dueAt = dueAt
@@ -227,10 +247,11 @@ BarWidget {
     var repeat = Number(repeatValue || 0)
     var monthDay = Number(monthDayValue || 0)
     var intervalDays = Number(intervalValue || 0)
-    var intervalStart = draftMode === "interval" ? parseStartDate(startDateValue) : null
+    var intervalStart = draftMode === "interval" || draftMode === "once" ? parseStartDate(startDateValue) : null
     if (!Number.isInteger(repeat) || repeat < 0 || repeat > 10080
         || (draftMode === "monthly" && (!Number.isInteger(monthDay) || monthDay < 1 || monthDay > 31))
-        || (draftMode === "interval" && (!Number.isInteger(intervalDays) || intervalDays < 1 || intervalDays > 3650 || !intervalStart))) {
+        || ((draftMode === "interval" || draftMode === "once") && !intervalStart)
+        || (draftMode === "interval" && (!Number.isInteger(intervalDays) || intervalDays < 1 || intervalDays > 3650))) {
       formErrorText = strings.t("error.schedule")
       return false
     }
@@ -248,9 +269,12 @@ BarWidget {
       dueAt: 0,
       lastNotifiedAt: 0
     }
-    task.dueAt = draftMode === "interval"
-      ? firstIntervalDate(startDateValue, intervalDays, task.hour, task.minute, Date.now())
-      : nextDate(task, Date.now())
+    if (draftMode === "interval")
+      task.dueAt = firstIntervalDate(startDateValue, intervalDays, task.hour, task.minute, Date.now())
+    else if (draftMode === "once")
+      task.dueAt = new Date(intervalStart.getFullYear(), intervalStart.getMonth(), intervalStart.getDate(), task.hour, task.minute).getTime()
+    else
+      task.dueAt = nextDate(task, Date.now())
     if (!task.dueAt) {
       formErrorText = strings.t("error.nextDate")
       return false
@@ -258,7 +282,109 @@ BarWidget {
     tasks = tasks.concat([task])
     formErrorText = ""
     saveState()
+    checkDueTasks()
     return true
+  }
+
+  function exportTasks(fileUrl) {
+    if (!stateReady || stateError || transferMode !== "") return
+    var exported = tasks.map(function(task) {
+      return {
+        id: task.id,
+        title: task.title,
+        mode: task.mode,
+        days: task.days,
+        monthDay: task.monthDay,
+        intervalDays: task.intervalDays,
+        startDate: task.startDate,
+        hour: task.hour,
+        minute: task.minute,
+        repeatMinutes: task.repeatMinutes,
+        dueDate: dateInput(new Date(Number(task.dueAt))),
+        dueAt: task.dueAt,
+        lastNotifiedAt: task.lastNotifiedAt
+      }
+    })
+    var payload = JSON.stringify({ format: "omarchy-recurring-task-reminders", version: 1, tasks: exported }, null, 2) + "\n"
+    if (payload.length > 1048576) {
+      transferMessage = strings.t("transfer.tooLarge")
+      return
+    }
+    transferMode = "export"
+    transferMessage = ""
+    exportStarted = false
+    transferPayload = payload
+    transferPath = String(fileUrl)
+  }
+
+  function writeExport() {
+    if (transferMode !== "export" || exportStarted) return
+    exportStarted = true
+    transferFile.setText(transferPayload)
+  }
+
+  function importFromFile(fileUrl) {
+    if (!stateReady || stateError || transferMode !== "") return
+    transferMessage = ""
+    transferMode = "import"
+    transferPath = String(fileUrl)
+  }
+
+  function importTasks(raw) {
+    if (!stateReady || stateError || raw.length > 1048576) {
+      transferMessage = strings.t("transfer.tooLarge")
+      transferMode = ""
+      transferPath = ""
+      return
+    }
+    try {
+      var imported = JSON.parse(raw)
+      if (!imported || imported.format !== "omarchy-recurring-task-reminders" || imported.version !== 1)
+        throw new Error("unsupported file")
+      var issue = validateTaskList(imported.tasks)
+      if (issue) throw new Error(issue)
+      for (var v = 0; v < imported.tasks.length; v++) {
+        if (imported.tasks[v].dueDate !== undefined && !parseStartDate(imported.tasks[v].dueDate))
+          throw new Error("invalid due date")
+      }
+      var existing = ({})
+      for (var i = 0; i < tasks.length; i++) existing[tasks[i].id] = true
+      var additions = []
+      for (var j = 0; j < imported.tasks.length; j++) {
+        var source = imported.tasks[j]
+        if (existing[source.id]) continue
+        existing[source.id] = true
+        var portableDueDate = source.dueDate ? parseStartDate(source.dueDate) : null
+        additions.push({
+          id: source.id,
+          title: source.title,
+          mode: source.mode,
+          days: source.days.slice(),
+          monthDay: source.monthDay,
+          intervalDays: source.intervalDays,
+          startDate: source.startDate || "",
+          hour: source.hour,
+          minute: source.minute,
+          repeatMinutes: source.repeatMinutes,
+          dueAt: portableDueDate
+            ? new Date(portableDueDate.getFullYear(), portableDueDate.getMonth(), portableDueDate.getDate(), source.hour, source.minute).getTime()
+            : source.dueAt,
+          lastNotifiedAt: 0
+        })
+      }
+      if (tasks.length + additions.length > 500) throw new Error("too many tasks")
+      tasks = tasks.concat(additions)
+      saveState()
+      checkDueTasks()
+      transferMessage = additions.length
+        ? strings.tn("transfer.imported", additions.length).arg(Commons.I18n.formatNumber(additions.length))
+        : strings.t("transfer.noNewTasks")
+    } catch (error) {
+      transferMessage = strings.t("transfer.invalid")
+      console.warn("Recurring Tasks import: " + error)
+    }
+    transferMode = ""
+    transferPath = ""
   }
 
   function open() { viewMode = "list"; panelOpen = true }
@@ -298,6 +424,55 @@ BarWidget {
     onLoaded: root.parseState(text())
     onLoadFailed: { root.stateError = true; console.warn("Recurring Tasks: could not load saved tasks") }
     onSaveFailed: { root.stateError = true; console.warn("Recurring Tasks: could not save tasks; editing paused to protect saved data") }
+  }
+
+  FileView {
+    id: transferFile
+    path: root.transferPath
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      if (root.transferMode === "import") root.importTasks(text())
+      else if (root.transferMode === "export") root.writeExport()
+    }
+    onLoadFailed: {
+      if (root.transferMode === "import") {
+        root.transferMessage = strings.t("transfer.readFailed")
+        root.transferMode = ""
+        root.transferPath = ""
+      } else if (root.transferMode === "export") root.writeExport()
+    }
+    onSaved: {
+      if (root.transferMode !== "export") return
+      root.transferMessage = strings.t("transfer.exported")
+      root.transferMode = ""
+      root.transferPath = ""
+      root.transferPayload = ""
+    }
+    onSaveFailed: {
+      if (root.transferMode !== "export") return
+      root.transferMessage = strings.t("transfer.writeFailed")
+      root.transferMode = ""
+      root.transferPath = ""
+      root.transferPayload = ""
+    }
+  }
+
+  FileDialog {
+    id: exportDialog
+    title: strings.t("transfer.exportTitle")
+    fileMode: FileDialog.SaveFile
+    defaultSuffix: "json"
+    nameFilters: [strings.t("transfer.filter")]
+    onAccepted: root.exportTasks(selectedFile)
+  }
+
+  FileDialog {
+    id: importDialog
+    title: strings.t("transfer.importTitle")
+    fileMode: FileDialog.OpenFile
+    nameFilters: [strings.t("transfer.filter")]
+    onAccepted: root.importFromFile(selectedFile)
   }
 
   Process {
@@ -379,7 +554,7 @@ BarWidget {
             width: parent.width
             spacing: Style.space(8)
             Text {
-              width: parent.width - (root.viewMode === "list" ? addButton.width : backButton.width) - parent.spacing
+              width: parent.width - (root.viewMode === "list" ? addButton.width + importButton.width + exportButton.width + parent.spacing * 3 : backButton.width) - parent.spacing
               textFormat: Text.PlainText
               text: strings.t(root.viewMode === "list" ? "plugin.title" : "task.add")
               color: Commons.Color.popups.text
@@ -405,6 +580,30 @@ BarWidget {
               }
             }
             PanelActionButton {
+              id: importButton
+              visible: root.viewMode === "list"
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\uf093"
+              tooltipText: strings.t("transfer.import")
+              foreground: Commons.Color.popups.text
+              focusable: true
+              bordered: true
+              enabled: root.stateReady && !root.stateError && root.transferMode === ""
+              onClicked: importDialog.open()
+            }
+            PanelActionButton {
+              id: exportButton
+              visible: root.viewMode === "list"
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\uf019"
+              tooltipText: strings.t("transfer.export")
+              foreground: Commons.Color.popups.text
+              focusable: true
+              bordered: true
+              enabled: root.stateReady && !root.stateError && root.transferMode === ""
+              onClicked: exportDialog.open()
+            }
+            PanelActionButton {
               id: backButton
               visible: root.viewMode === "add"
               anchors.verticalCenter: parent.verticalCenter
@@ -424,6 +623,17 @@ BarWidget {
             color: Commons.Color.bar.urgent
             wrapMode: Text.Wrap
             width: parent.width
+          }
+
+          Text {
+            visible: root.viewMode === "list" && root.transferMessage !== ""
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.transferMessage
+            color: Commons.Color.popups.text
+            wrapMode: Text.Wrap
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
           }
 
           Column {
@@ -534,7 +744,8 @@ BarWidget {
                   { value: "days", label: strings.t("schedule.days") },
                   { value: "interval", label: strings.t("schedule.interval") },
                   { value: "weekly", label: strings.t("schedule.weekly") },
-                  { value: "monthly", label: strings.t("schedule.monthly") }
+                  { value: "monthly", label: strings.t("schedule.monthly") },
+                  { value: "once", label: strings.t("schedule.once") }
                 ]
                 onChanged: function(next) {
                   root.draftMode = next
@@ -617,9 +828,9 @@ BarWidget {
 
             TextField {
               id: startDateInput
-              visible: root.draftMode === "interval"
+              visible: root.draftMode === "interval" || root.draftMode === "once"
               width: parent.width
-              placeholderText: strings.t("schedule.startDate")
+              placeholderText: strings.t(root.draftMode === "once" ? "schedule.onceDate" : "schedule.startDate")
               text: root.currentDateInput()
               maximumLength: 10
             }
