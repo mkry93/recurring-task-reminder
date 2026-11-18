@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Dialogs
 import Quickshell
 import Quickshell.Io
@@ -25,8 +26,10 @@ BarWidget {
   property var draftDays: []
   property int draftWeeklyDay: -1
   property string formErrorText: ""
+  property string editingTaskId: ""
   property string transferMode: ""
-  property string transferPath: ""
+  property string importPath: ""
+  property string exportPath: ""
   property string transferMessage: ""
   property string transferPayload: ""
   property bool exportStarted: false
@@ -248,6 +251,13 @@ BarWidget {
     var monthDay = Number(monthDayValue || 0)
     var intervalDays = Number(intervalValue || 0)
     var intervalStart = draftMode === "interval" || draftMode === "once" ? parseStartDate(startDateValue) : null
+    var originalTask = null
+    if (editingTaskId) {
+      for (var i = 0; i < tasks.length; i++) {
+        if (tasks[i].id === editingTaskId) { originalTask = tasks[i]; break }
+      }
+      if (!originalTask) return false
+    }
     if (!Number.isInteger(repeat) || repeat < 0 || repeat > 10080
         || (draftMode === "monthly" && (!Number.isInteger(monthDay) || monthDay < 1 || monthDay > 31))
         || ((draftMode === "interval" || draftMode === "once") && !intervalStart)
@@ -256,7 +266,7 @@ BarWidget {
       return false
     }
     var task = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+      id: editingTaskId || Date.now().toString(36) + Math.random().toString(36).slice(2),
       title: title,
       mode: draftMode,
       days: (draftMode === "weekly" ? [draftWeeklyDay] : draftDays.slice()).sort(function(a, b) { return a - b }),
@@ -269,7 +279,15 @@ BarWidget {
       dueAt: 0,
       lastNotifiedAt: 0
     }
-    if (draftMode === "interval")
+    var sameSchedule = originalTask !== null && originalTask.mode === task.mode
+      && JSON.stringify(originalTask.days) === JSON.stringify(task.days)
+      && Number(originalTask.monthDay) === task.monthDay
+      && Number(originalTask.intervalDays) === task.intervalDays
+      && originalTask.startDate === task.startDate
+      && Number(originalTask.hour) === task.hour && Number(originalTask.minute) === task.minute
+    if (sameSchedule)
+      task.dueAt = Number(originalTask.dueAt)
+    else if (draftMode === "interval")
       task.dueAt = firstIntervalDate(startDateValue, intervalDays, task.hour, task.minute, Date.now())
     else if (draftMode === "once")
       task.dueAt = new Date(intervalStart.getFullYear(), intervalStart.getMonth(), intervalStart.getDate(), task.hour, task.minute).getTime()
@@ -279,7 +297,20 @@ BarWidget {
       formErrorText = strings.t("error.nextDate")
       return false
     }
-    tasks = tasks.concat([task])
+    if (sameSchedule && Number(originalTask.repeatMinutes) === task.repeatMinutes)
+      task.lastNotifiedAt = Number(originalTask.lastNotifiedAt)
+    if (editingTaskId) {
+      var updated = false
+      tasks = tasks.map(function(existing) {
+        if (existing.id !== editingTaskId) return existing
+        updated = true
+        return task
+      })
+      if (!updated) return false
+      editingTaskId = ""
+    } else {
+      tasks = tasks.concat([task])
+    }
     formErrorText = ""
     saveState()
     checkDueTasks()
@@ -314,27 +345,27 @@ BarWidget {
     transferMessage = ""
     exportStarted = false
     transferPayload = payload
-    transferPath = String(fileUrl)
+    exportPath = String(fileUrl)
   }
 
   function writeExport() {
     if (transferMode !== "export" || exportStarted) return
     exportStarted = true
-    transferFile.setText(transferPayload)
+    exportFile.setText(transferPayload)
   }
 
   function importFromFile(fileUrl) {
     if (!stateReady || stateError || transferMode !== "") return
     transferMessage = ""
     transferMode = "import"
-    transferPath = String(fileUrl)
+    importPath = String(fileUrl)
   }
 
   function importTasks(raw) {
     if (!stateReady || stateError || raw.length > 1048576) {
       transferMessage = strings.t("transfer.tooLarge")
       transferMode = ""
-      transferPath = ""
+      importPath = ""
       return
     }
     try {
@@ -384,7 +415,30 @@ BarWidget {
       console.warn("Recurring Tasks import: " + error)
     }
     transferMode = ""
-    transferPath = ""
+    importPath = ""
+  }
+
+  function editTask(task) {
+    editingTaskId = task.id
+    draftMode = task.mode
+    draftDays = task.days.slice()
+    draftWeeklyDay = task.mode === "weekly" ? Number(task.days[0]) : -1
+    formErrorText = ""
+    titleInput.text = task.title
+    timeInput.text = String(task.hour).padStart(2, "0") + ":" + String(task.minute).padStart(2, "0")
+    repeatInput.text = String(task.repeatMinutes)
+    monthDayInput.text = String(task.monthDay)
+    intervalInput.text = String(task.intervalDays)
+    startDateInput.text = task.startDate || dateInput(new Date(Number(task.dueAt)))
+    viewMode = "add"
+  }
+
+  function scheduleType(task) {
+    if (task.mode === "once") return strings.t("schedule.once")
+    if (task.mode === "interval") return strings.tn("task.type.interval", Number(task.intervalDays)).arg(Commons.I18n.formatNumber(task.intervalDays))
+    if (task.mode === "weekly") return strings.t("schedule.weekly")
+    if (task.mode === "monthly") return strings.t("task.type.monthly").arg(Commons.I18n.formatNumber(task.monthDay))
+    return strings.t("schedule.days")
   }
 
   function open() { viewMode = "list"; panelOpen = true }
@@ -427,33 +481,39 @@ BarWidget {
   }
 
   FileView {
-    id: transferFile
-    path: root.transferPath
+    id: importFile
+    path: root.importPath
     atomicWrites: true
     printErrors: false
-    onLoaded: {
-      if (root.transferMode === "import") root.importTasks(text())
-      else if (root.transferMode === "export") root.writeExport()
-    }
+    onLoaded: if (root.transferMode === "import") root.importTasks(text())
     onLoadFailed: {
       if (root.transferMode === "import") {
         root.transferMessage = strings.t("transfer.readFailed")
         root.transferMode = ""
-        root.transferPath = ""
-      } else if (root.transferMode === "export") root.writeExport()
+        root.importPath = ""
+      }
     }
+  }
+
+  FileView {
+    id: exportFile
+    path: root.exportPath
+    atomicWrites: true
+    printErrors: false
+    onLoaded: if (root.transferMode === "export") root.writeExport()
+    onLoadFailed: if (root.transferMode === "export") root.writeExport()
     onSaved: {
       if (root.transferMode !== "export") return
       root.transferMessage = strings.t("transfer.exported")
       root.transferMode = ""
-      root.transferPath = ""
+      root.exportPath = ""
       root.transferPayload = ""
     }
     onSaveFailed: {
       if (root.transferMode !== "export") return
       root.transferMessage = strings.t("transfer.writeFailed")
       root.transferMode = ""
-      root.transferPath = ""
+      root.exportPath = ""
       root.transferPayload = ""
     }
   }
@@ -544,6 +604,7 @@ BarWidget {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         Column {
           id: contentColumn
@@ -556,7 +617,7 @@ BarWidget {
             Text {
               width: parent.width - (root.viewMode === "list" ? addButton.width + importButton.width + exportButton.width + parent.spacing * 3 : backButton.width) - parent.spacing
               textFormat: Text.PlainText
-              text: strings.t(root.viewMode === "list" ? "plugin.title" : "task.add")
+              text: strings.t(root.viewMode === "list" ? "plugin.title" : (root.editingTaskId ? "task.edit" : "task.add"))
               color: Commons.Color.popups.text
               font.family: Style.font.family
               font.pixelSize: Style.font.title
@@ -575,6 +636,8 @@ BarWidget {
               bordered: true
               onClicked: {
                 root.formErrorText = ""
+                root.editingTaskId = ""
+                titleInput.text = ""
                 startDateInput.text = root.currentDateInput()
                 root.viewMode = "add"
               }
@@ -612,7 +675,7 @@ BarWidget {
               foreground: Commons.Color.popups.text
               focusable: true
               bordered: true
-              onClicked: root.viewMode = "list"
+              onClicked: { root.editingTaskId = ""; root.viewMode = "list" }
             }
           }
 
@@ -658,7 +721,7 @@ BarWidget {
                   spacing: Style.space(8)
 
                   Column {
-                    width: parent.width - doneButton.width - deleteButton.width - parent.spacing * 2
+                    width: parent.width - editButton.width - doneButton.width - deleteButton.width - parent.spacing * 3
                     spacing: Style.space(3)
                     Text {
                       width: parent.width
@@ -680,12 +743,30 @@ BarWidget {
                     Text {
                       width: parent.width
                       textFormat: Text.PlainText
+                      text: root.scheduleType(modelData)
+                      color: Qt.darker(Commons.Color.popups.text, 1.2)
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
                       text: root.nextDueLabel(Number(modelData.dueAt))
                       color: Number(modelData.dueAt) <= root.clockNow ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.2)
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
                       elide: Text.ElideRight
                     }
+                  }
+                  PanelActionButton {
+                    id: editButton
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: "\uf044"
+                    tooltipText: strings.t("task.edit")
+                    foreground: Commons.Color.popups.text
+                    enabled: !root.stateError
+                    onClicked: root.editTask(modelData)
                   }
                   PanelActionButton {
                     id: doneButton
@@ -882,7 +963,7 @@ BarWidget {
               width: parent.width
               size: Style.spacing.controlHeight
               iconText: "\uf00c"
-              tooltipText: strings.t("task.save")
+              tooltipText: strings.t(root.editingTaskId ? "task.update" : "task.save")
               foreground: Commons.Color.popups.text
               enabled: root.stateReady && !root.stateError
               bordered: true
