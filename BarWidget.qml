@@ -583,7 +583,7 @@ BarWidget {
               id: importButton
               visible: root.viewMode === "list"
               anchors.verticalCenter: parent.verticalCenter
-              iconText: "\uf093"
+              iconText: "\uf019"
               tooltipText: strings.t("transfer.import")
               foreground: Commons.Color.popups.text
               focusable: true
@@ -595,7 +595,7 @@ BarWidget {
               id: exportButton
               visible: root.viewMode === "list"
               anchors.verticalCenter: parent.verticalCenter
-              iconText: "\uf019"
+              iconText: "\uf093"
               tooltipText: strings.t("transfer.export")
               foreground: Commons.Color.popups.text
               focusable: true
