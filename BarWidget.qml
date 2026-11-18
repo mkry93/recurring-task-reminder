@@ -12,6 +12,7 @@ BarWidget {
   moduleName: "io.github.mkry93.task-reminders"
 
   property bool panelOpen: false
+  property string viewMode: "list"
   property bool statePrepared: false
   property bool stateReady: false
   property bool stateError: false
@@ -21,10 +22,8 @@ BarWidget {
   property var notifyInFlight: null
   property string draftMode: "days"
   property var draftDays: []
-  property int draftMonthDay: 1
-  property int draftHour: 9
-  property int draftMinute: 0
-  property int draftRepeatMinutes: 0
+  property int draftWeeklyDay: -1
+  property string formErrorText: ""
   readonly property string stateFilePath: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/recurring-task-reminder/tasks.json"
   readonly property int dueCount: tasks.filter(function(task) { return Number(task.dueAt) <= root.clockNow }).length
 
@@ -38,7 +37,7 @@ BarWidget {
       for (var i = 0; i < parsed.tasks.length; i++) {
         var task = parsed.tasks[i]
         if (!task || typeof task.id !== "string" || typeof task.title !== "string"
-            || !["days", "weekly", "monthly"].includes(task.mode)
+            || !["days", "interval", "weekly", "monthly"].includes(task.mode)
             || !Array.isArray(task.days) || !Number.isFinite(Number(task.dueAt))
             || !Number.isFinite(Number(task.hour)) || task.hour < 0 || task.hour > 23
             || !Number.isFinite(Number(task.minute)) || task.minute < 0 || task.minute > 59
@@ -48,6 +47,7 @@ BarWidget {
             || task.title.length === 0 || task.title.length > 120
             || (task.mode === "days" && task.days.length === 0)
             || (task.mode === "weekly" && task.days.length !== 1)
+            || (task.mode === "interval" && (!Number.isInteger(task.intervalDays) || task.intervalDays < 1 || task.intervalDays > 3650))
             || task.days.some(function(day) { return !Number.isInteger(day) || day < 0 || day > 6 }))
           throw new Error("Invalid task reminder entry")
       }
@@ -68,6 +68,11 @@ BarWidget {
 
   function nextDate(task, afterMs) {
     var after = new Date(afterMs)
+    if (task.mode === "interval") {
+      var intervalDate = new Date(after.getFullYear(), after.getMonth(), after.getDate() + Number(task.intervalDays),
+        Number(task.hour), Number(task.minute), 0, 0)
+      return intervalDate.getTime() > afterMs ? intervalDate.getTime() : 0
+    }
     var date = new Date(after.getFullYear(), after.getMonth(), after.getDate())
     for (var offset = 0; offset <= 370; offset++) {
       var candidateDate = new Date(date.getFullYear(), date.getMonth(), date.getDate() + offset)
@@ -148,31 +153,34 @@ BarWidget {
     saveState()
   }
 
-  function createTask(titleValue, timeValue, repeatValue, monthDayValue) {
-    if (!stateReady || stateError) return
+  function createTask(titleValue, timeValue, repeatValue, monthDayValue, intervalValue) {
+    if (!stateReady || stateError) return false
     var title = String(titleValue).trim()
     var time = String(timeValue).trim().match(/^(\d{1,2}):(\d{2})$/)
     if (!title || title.length > 120 || !time || Number(time[1]) > 23 || Number(time[2]) > 59) {
-      formError.text = strings.t("error.titleTime")
-      return
+      formErrorText = strings.t("error.titleTime")
+      return false
     }
-    if ((draftMode === "days" && draftDays.length === 0) || (draftMode === "weekly" && draftDays.length !== 1)) {
-      formError.text = draftMode === "weekly" ? strings.t("error.weekday") : strings.t("error.days")
-      return
+    if ((draftMode === "days" && draftDays.length === 0) || (draftMode === "weekly" && draftWeeklyDay < 0)) {
+      formErrorText = draftMode === "weekly" ? strings.t("error.weekday") : strings.t("error.days")
+      return false
     }
     var repeat = Number(repeatValue || 0)
     var monthDay = Number(monthDayValue || 0)
+    var intervalDays = Number(intervalValue || 0)
     if (!Number.isInteger(repeat) || repeat < 0 || repeat > 10080
-        || (draftMode === "monthly" && (!Number.isInteger(monthDay) || monthDay < 1 || monthDay > 31))) {
-      formError.text = strings.t("error.repeatMonth")
-      return
+        || (draftMode === "monthly" && (!Number.isInteger(monthDay) || monthDay < 1 || monthDay > 31))
+        || (draftMode === "interval" && (!Number.isInteger(intervalDays) || intervalDays < 1 || intervalDays > 3650))) {
+      formErrorText = strings.t("error.schedule")
+      return false
     }
     var task = {
       id: Date.now().toString(36) + Math.random().toString(36).slice(2),
       title: title,
       mode: draftMode,
-      days: draftDays.slice().sort(function(a, b) { return a - b }),
+      days: (draftMode === "weekly" ? [draftWeeklyDay] : draftDays.slice()).sort(function(a, b) { return a - b }),
       monthDay: monthDay,
+      intervalDays: intervalDays,
       hour: Number(time[1]),
       minute: Number(time[2]),
       repeatMinutes: repeat,
@@ -181,13 +189,26 @@ BarWidget {
     }
     task.dueAt = nextDate(task, Date.now())
     if (!task.dueAt) {
-      formError.text = strings.t("error.nextDate")
-      return
+      formErrorText = strings.t("error.nextDate")
+      return false
     }
     tasks = tasks.concat([task])
-    formError.text = ""
-    titleInput.text = ""
+    formErrorText = ""
     saveState()
+    return true
+  }
+
+  function open() { viewMode = "list"; panelOpen = true }
+  function close() { panelOpen = false }
+  function togglePanel() { panelOpen ? close() : open() }
+
+  IpcHandler {
+    target: root.moduleName
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.togglePanel() }
   }
 
   function formatDue(ms) {
@@ -257,7 +278,9 @@ BarWidget {
     tooltipText: root.dueCount > 0
       ? strings.tn("bar.due", root.dueCount).arg(Commons.I18n.formatNumber(root.dueCount))
       : strings.t("plugin.title")
-    onPressed: root.panelOpen = !root.panelOpen
+    onPressed: function(buttonCode) {
+      if (buttonCode === Qt.LeftButton) root.togglePanel()
+    }
   }
 
   KeyboardPanel {
@@ -273,8 +296,8 @@ BarWidget {
     content: PanelKeyCatcher {
       anchors.fill: parent
       implicitHeight: contentColumn.implicitHeight
-      blocked: titleInput.activeFocus || timeInput.activeFocus || repeatInput.activeFocus || monthDayInput.activeFocus
-      onCloseRequested: root.panelOpen = false
+      blocked: titleInput.activeFocus || timeInput.activeFocus || repeatInput.activeFocus || monthDayInput.activeFocus || intervalInput.activeFocus
+      onCloseRequested: root.close()
 
       Flickable {
         anchors.fill: parent
@@ -289,13 +312,42 @@ BarWidget {
           width: parent.width
           spacing: Style.space(12)
 
-          Text {
-            textFormat: Text.PlainText
-            text: strings.t("plugin.title")
-            color: Commons.Color.popups.text
-            font.family: Style.font.family
-            font.pixelSize: Style.font.title
-            font.bold: true
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+            Text {
+              width: parent.width - (root.viewMode === "list" ? addButton.width : backButton.width) - parent.spacing
+              textFormat: Text.PlainText
+              text: strings.t(root.viewMode === "list" ? "plugin.title" : "task.add")
+              color: Commons.Color.popups.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.title
+              font.bold: true
+              anchors.verticalCenter: parent.verticalCenter
+              elide: Text.ElideRight
+            }
+            PanelActionButton {
+              id: addButton
+              visible: root.viewMode === "list"
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\uf067"
+              tooltipText: strings.t("task.add")
+              foreground: Commons.Color.popups.text
+              focusable: true
+              bordered: true
+              onClicked: { root.formErrorText = ""; root.viewMode = "add" }
+            }
+            PanelActionButton {
+              id: backButton
+              visible: root.viewMode === "add"
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\uf060"
+              tooltipText: strings.t("nav.tasks")
+              foreground: Commons.Color.popups.text
+              focusable: true
+              bordered: true
+              onClicked: root.viewMode = "list"
+            }
           }
 
           Text {
@@ -307,205 +359,244 @@ BarWidget {
             width: parent.width
           }
 
-          Repeater {
-            model: root.tasks
-            delegate: BorderSurface {
-              required property var modelData
-              width: contentColumn.width
-              implicitHeight: taskRow.implicitHeight + Style.space(16)
-              color: "transparent"
-              borderSpec: Border.controlSpec("normal", Commons.Color.popups.text, Commons.Color.accent)
+          Column {
+            id: listPage
+            visible: root.viewMode === "list"
+            width: parent.width
+            spacing: Style.space(8)
 
-              Row {
-                id: taskRow
-                anchors.fill: parent
-                anchors.margins: Style.space(8)
-                spacing: Style.space(8)
+            Repeater {
+              model: root.tasks
+              delegate: BorderSurface {
+                required property var modelData
+                width: listPage.width
+                implicitHeight: taskRow.implicitHeight + Style.space(16)
+                color: "transparent"
+                borderSpec: Border.controlSpec("normal", Commons.Color.popups.text, Commons.Color.accent)
 
-                Column {
-                  width: parent.width - doneButton.width - deleteButton.width - parent.spacing * 2
-                  spacing: Style.space(3)
-                  Text {
-                    width: parent.width
-                    textFormat: Text.PlainText
-                    text: modelData.title
-                    color: Commons.Color.popups.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    elide: Text.ElideRight
+                Row {
+                  id: taskRow
+                  anchors.fill: parent
+                  anchors.margins: Style.space(8)
+                  spacing: Style.space(8)
+
+                  Column {
+                    width: parent.width - doneButton.width - deleteButton.width - parent.spacing * 2
+                    spacing: Style.space(3)
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: modelData.title
+                      color: Commons.Color.popups.text
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      elide: Text.ElideRight
+                    }
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: root.formatDue(Number(modelData.dueAt)) + (Number(modelData.dueAt) <= root.clockNow ? " · " + strings.t("task.dueSuffix") : "")
+                      color: Number(modelData.dueAt) <= root.clockNow ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.2)
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                    }
                   }
+                  PanelActionButton {
+                    id: doneButton
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: "\uf00c"
+                    tooltipText: strings.t("task.done")
+                    foreground: Commons.Color.popups.text
+                    enabled: !root.stateError
+                    onClicked: root.finishTask(modelData.id)
+                  }
+                  PanelActionButton {
+                    id: deleteButton
+                    anchors.verticalCenter: parent.verticalCenter
+                    iconText: "\uf2ed"
+                    tooltipText: strings.t("task.delete")
+                    foreground: Commons.Color.popups.text
+                    enabled: !root.stateError
+                    onClicked: root.deleteTask(modelData.id)
+                  }
+                }
+              }
+            }
+
+            Text {
+              visible: root.tasks.length === 0 && !root.stateError
+              textFormat: Text.PlainText
+              text: strings.t("task.empty")
+              color: Qt.darker(Commons.Color.popups.text, 1.2)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+            }
+          }
+
+          Column {
+            id: editorPage
+            visible: root.viewMode === "add"
+            width: parent.width
+            spacing: Style.space(10)
+
+            TextField {
+              id: titleInput
+              width: parent.width
+              placeholderText: strings.t("task.name")
+              enabled: root.stateReady && !root.stateError
+              maximumLength: 120
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              Dropdown {
+                width: (parent.width - parent.spacing) * 0.58
+                label: strings.t("schedule.repeat")
+                value: root.draftMode
+                options: [
+                  { value: "days", label: strings.t("schedule.days") },
+                  { value: "interval", label: strings.t("schedule.interval") },
+                  { value: "weekly", label: strings.t("schedule.weekly") },
+                  { value: "monthly", label: strings.t("schedule.monthly") }
+                ]
+                onChanged: function(next) {
+                  root.draftMode = next
+                  if (next === "weekly" && root.draftWeeklyDay < 0 && root.draftDays.length > 0)
+                    root.draftWeeklyDay = root.draftDays[0]
+                }
+              }
+              TextField {
+                id: timeInput
+                width: parent.width - parent.children[0].width - parent.spacing
+                placeholderText: strings.t("time.placeholder")
+                text: "09:00"
+                maximumLength: 5
+              }
+            }
+
+            Row {
+              visible: root.draftMode === "days" || root.draftMode === "weekly"
+              width: parent.width
+              spacing: Style.space(4)
+              Repeater {
+                model: [strings.t("weekday.sun"), strings.t("weekday.mon"), strings.t("weekday.tue"),
+                  strings.t("weekday.wed"), strings.t("weekday.thu"), strings.t("weekday.fri"), strings.t("weekday.sat")]
+                delegate: BorderSurface {
+                  required property int index
+                  required property string modelData
+                  width: (parent.width - parent.spacing * 6) / 7
+                  height: Style.space(32)
+                  readonly property bool chosen: root.draftMode === "weekly"
+                    ? root.draftWeeklyDay === index
+                    : root.draftDays.indexOf(index) >= 0
+                  color: chosen ? Style.hoverFillFor(Commons.Color.popups.text, Commons.Color.accent) : "transparent"
+                  borderSpec: Border.controlSpec(chosen ? "focus" : "normal", Commons.Color.popups.text, Commons.Color.accent)
                   Text {
-                    width: parent.width
+                    anchors.centerIn: parent
                     textFormat: Text.PlainText
-                    text: root.formatDue(Number(modelData.dueAt)) + (Number(modelData.dueAt) <= root.clockNow ? " · " + strings.t("task.dueSuffix") : "")
-                    color: Number(modelData.dueAt) <= root.clockNow ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.2)
+                    text: modelData
+                    color: Commons.Color.popups.text
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
-                }
-                PanelActionButton {
-                  id: doneButton
-                  anchors.verticalCenter: parent.verticalCenter
-                  iconText: "\uf00c"
-                    tooltipText: strings.t("task.done")
-                  foreground: Commons.Color.popups.text
-                  enabled: !root.stateError
-                  onClicked: root.finishTask(modelData.id)
-                }
-                PanelActionButton {
-                  id: deleteButton
-                  anchors.verticalCenter: parent.verticalCenter
-                  iconText: "\uf2ed"
-                    tooltipText: strings.t("task.delete")
-                  foreground: Commons.Color.popups.text
-                  enabled: !root.stateError
-                  onClicked: root.deleteTask(modelData.id)
-                }
-              }
-            }
-          }
-
-          Text {
-            visible: root.tasks.length === 0 && !root.stateError
-            textFormat: Text.PlainText
-            text: strings.t("task.empty")
-            color: Qt.darker(Commons.Color.popups.text, 1.2)
-            font.family: Style.font.family
-            font.pixelSize: Style.font.body
-          }
-
-          Rectangle { width: parent.width; height: Style.space(1); color: Commons.Color.popups.border }
-
-          Text {
-            textFormat: Text.PlainText
-            text: strings.t("task.add")
-            color: Commons.Color.popups.text
-            font.family: Style.font.family
-            font.pixelSize: Style.font.body
-            font.bold: true
-          }
-
-          TextField {
-            id: titleInput
-            width: parent.width
-            placeholderText: strings.t("task.name")
-            enabled: root.stateReady && !root.stateError
-            maximumLength: 120
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.space(8)
-            Dropdown {
-              width: (parent.width - parent.spacing) * 0.58
-              label: strings.t("schedule.repeat")
-              value: root.draftMode
-              options: [
-                { value: "days", label: strings.t("schedule.days") },
-                { value: "weekly", label: strings.t("schedule.weekly") },
-                { value: "monthly", label: strings.t("schedule.monthly") }
-              ]
-              onChanged: function(next) { root.draftMode = next; root.draftDays = [] }
-            }
-            TextField {
-              id: timeInput
-              width: parent.width - parent.children[0].width - parent.spacing
-              placeholderText: strings.t("time.placeholder")
-              text: "09:00"
-              maximumLength: 5
-            }
-          }
-
-          Row {
-            visible: root.draftMode !== "monthly"
-            width: parent.width
-            spacing: Style.space(4)
-            Repeater {
-              model: [strings.t("weekday.sun"), strings.t("weekday.mon"), strings.t("weekday.tue"),
-                strings.t("weekday.wed"), strings.t("weekday.thu"), strings.t("weekday.fri"), strings.t("weekday.sat")]
-              delegate: BorderSurface {
-                required property int index
-                required property string modelData
-                width: (parent.width - parent.spacing * 6) / 7
-                height: Style.space(32)
-                readonly property bool chosen: root.draftDays.indexOf(index) >= 0
-                color: chosen ? Style.hoverFillFor(Commons.Color.popups.text, Commons.Color.accent) : "transparent"
-                borderSpec: Border.controlSpec(chosen ? "focus" : "normal", Commons.Color.popups.text, Commons.Color.accent)
-                Text {
-                  anchors.centerIn: parent
-                  textFormat: Text.PlainText
-                  text: modelData
-                  color: Commons.Color.popups.text
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                }
-                MouseArea {
-                  anchors.fill: parent
-                  enabled: root.draftMode !== "weekly" || root.draftDays.indexOf(index) < 0 || root.draftDays.length === 1
-                  onClicked: {
-                    var selected = root.draftDays.slice()
-                    if (selected.indexOf(index) >= 0) selected.splice(selected.indexOf(index), 1)
-                    else if (root.draftMode === "weekly") selected = [index]
-                    else selected.push(index)
-                    root.draftDays = selected
+                  MouseArea {
+                    anchors.fill: parent
+                    onClicked: {
+                      if (root.draftMode === "weekly") root.draftWeeklyDay = index
+                      else {
+                        var selected = root.draftDays.slice()
+                        if (selected.indexOf(index) >= 0) selected.splice(selected.indexOf(index), 1)
+                        else selected.push(index)
+                        root.draftDays = selected
+                      }
+                    }
                   }
                 }
               }
             }
-          }
 
-          TextField {
-            id: monthDayInput
-            visible: root.draftMode === "monthly"
-            width: parent.width
-            placeholderText: strings.t("schedule.monthDay")
-            text: "1"
-            maximumLength: 2
-            validator: IntValidator { bottom: 1; top: 31 }
-          }
+            Row {
+              visible: root.draftMode === "interval"
+              width: parent.width
+              spacing: Style.space(8)
+              Text {
+                width: parent.width * 0.62
+                textFormat: Text.PlainText
+                text: strings.t("schedule.intervalDays")
+                color: Commons.Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.Wrap
+              }
+              TextField {
+                id: intervalInput
+                width: parent.width - parent.children[0].width - parent.spacing
+                placeholderText: "1"
+                text: "9"
+                maximumLength: 4
+                validator: IntValidator { bottom: 1; top: 3650 }
+              }
+            }
 
-          Row {
-            width: parent.width
-            spacing: Style.space(8)
+            TextField {
+              id: monthDayInput
+              visible: root.draftMode === "monthly"
+              width: parent.width
+              placeholderText: strings.t("schedule.monthDay")
+              text: "1"
+              maximumLength: 2
+              validator: IntValidator { bottom: 1; top: 31 }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(8)
+              Text {
+                width: parent.width * 0.57
+                textFormat: Text.PlainText
+                text: strings.t("schedule.repeatMinutes")
+                wrapMode: Text.Wrap
+                color: Commons.Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              TextField {
+                id: repeatInput
+                width: parent.width - parent.children[0].width - parent.spacing
+                placeholderText: "0"
+                text: "0"
+                maximumLength: 5
+                validator: IntValidator { bottom: 0; top: 10080 }
+              }
+            }
+
             Text {
-              width: parent.width * 0.57
+              visible: root.formErrorText !== ""
+              width: parent.width
               textFormat: Text.PlainText
-              text: strings.t("schedule.repeatMinutes")
+              text: root.formErrorText
+              color: Commons.Color.bar.urgent
               wrapMode: Text.Wrap
-              color: Commons.Color.popups.text
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
-            TextField {
-              id: repeatInput
-              width: parent.width - parent.children[0].width - parent.spacing
-              placeholderText: "0"
-              text: "0"
-              maximumLength: 5
-              validator: IntValidator { bottom: 0; top: 10080 }
+
+            PanelActionButton {
+              width: parent.width
+              size: Style.spacing.controlHeight
+              iconText: "\uf00c"
+              tooltipText: strings.t("task.save")
+              foreground: Commons.Color.popups.text
+              enabled: root.stateReady && !root.stateError
+              bordered: true
+              onClicked: {
+                if (root.createTask(titleInput.text, timeInput.text, repeatInput.text, monthDayInput.text, intervalInput.text)) {
+                  titleInput.text = ""
+                  root.viewMode = "list"
+                }
+              }
             }
-          }
-
-          Text {
-            id: formError
-            visible: text !== ""
-            width: parent.width
-            textFormat: Text.PlainText
-            color: Commons.Color.bar.urgent
-            wrapMode: Text.Wrap
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-          }
-
-          PanelActionButton {
-            width: parent.width
-            size: Style.spacing.controlHeight
-            iconText: "\uf067"
-              tooltipText: strings.t("task.add")
-            foreground: Commons.Color.popups.text
-            enabled: root.stateReady && !root.stateError
-            bordered: true
-            onClicked: root.createTask(titleInput.text, timeInput.text, repeatInput.text, monthDayInput.text)
           }
         }
       }
