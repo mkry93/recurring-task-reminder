@@ -2,8 +2,9 @@
 
 A small Omarchy bar plugin for recurring reminders that stay due until you mark
 them done. It supports selected weekdays, every N days, a weekly weekday, and
-a day of each month. Tasks use local time; monthly dates that do not exist in
-a month are skipped.
+a day of each month. Every N days takes a start date in `DD/MM/YYYY` form and
+keeps that date as its recurrence anchor. Tasks use local time; monthly dates
+that do not exist in a month are skipped.
 
 The popup separates the task list from task creation. Choose **Add task** to
 open the form; save or return to the list when done.

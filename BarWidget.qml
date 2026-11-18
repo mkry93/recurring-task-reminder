@@ -50,6 +50,10 @@ BarWidget {
             || (task.mode === "interval" && (!Number.isInteger(task.intervalDays) || task.intervalDays < 1 || task.intervalDays > 3650))
             || task.days.some(function(day) { return !Number.isInteger(day) || day < 0 || day > 6 }))
           throw new Error("Invalid task reminder entry")
+        if (task.mode === "interval") {
+          if (!task.startDate) task.startDate = dateInput(new Date(Number(task.dueAt)))
+          if (!parseStartDate(task.startDate)) throw new Error("Invalid interval start date")
+        }
       }
       tasks = parsed.tasks
       stateReady = true
@@ -91,6 +95,61 @@ BarWidget {
       if (candidate.getTime() > afterMs) return candidate.getTime()
     }
     return 0
+  }
+
+  function parseStartDate(value) {
+    var parts = String(value || "").match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+    if (!parts) return null
+    var day = Number(parts[1]), month = Number(parts[2]), year = Number(parts[3])
+    if (year < 1900 || year > 9999) return null
+    var parsed = new Date(year, month - 1, day)
+    return parsed.getFullYear() === year && parsed.getMonth() === month - 1 && parsed.getDate() === day
+      ? parsed : null
+  }
+
+  function dateInput(date) {
+    return String(date.getDate()).padStart(2, "0") + "/"
+      + String(date.getMonth() + 1).padStart(2, "0") + "/"
+      + String(date.getFullYear()).padStart(4, "0")
+  }
+
+  function currentDateInput() {
+    return dateInput(new Date())
+  }
+
+  function firstIntervalDate(startDate, intervalDays, hour, minute, nowMs) {
+    var anchor = parseStartDate(startDate)
+    if (!anchor) return 0
+    var now = new Date(nowMs)
+    var dayDifference = Math.floor((Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())
+      - Date.UTC(anchor.getFullYear(), anchor.getMonth(), anchor.getDate())) / 86400000)
+    var occurrence = Math.max(0, Math.floor(dayDifference / intervalDays))
+    var candidate = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + occurrence * intervalDays,
+      hour, minute, 0, 0)
+    if (candidate.getTime() < Math.floor(nowMs / 60000) * 60000) {
+      occurrence++
+      candidate = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + occurrence * intervalDays,
+        hour, minute, 0, 0)
+    }
+    return candidate.getTime()
+  }
+
+  function timeLabel(date) {
+    return date.getHours()
+      + ":" + (date.getMinutes() < 10 ? "0" : "") + date.getMinutes()
+  }
+
+  function nextDueLabel(ms) {
+    if (ms <= clockNow) return strings.t("task.now")
+    var next = new Date(ms)
+    var now = new Date(clockNow)
+    var days = Math.round((Date.UTC(next.getFullYear(), next.getMonth(), next.getDate())
+      - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000)
+    var formattedDate = next.toLocaleDateString(Qt.locale(Commons.I18n.formatLocale), "dd/MM/yy")
+    var formattedTime = timeLabel(next)
+    if (days === 0) return strings.t("task.todayAt").arg(formattedTime)
+    return strings.tn("task.nextIn", days)
+      .arg(Commons.I18n.formatNumber(days)).arg(formattedDate).arg(formattedTime)
   }
 
   function checkDueTasks() {
@@ -153,7 +212,7 @@ BarWidget {
     saveState()
   }
 
-  function createTask(titleValue, timeValue, repeatValue, monthDayValue, intervalValue) {
+  function createTask(titleValue, timeValue, repeatValue, monthDayValue, intervalValue, startDateValue) {
     if (!stateReady || stateError) return false
     var title = String(titleValue).trim()
     var time = String(timeValue).trim().match(/^(\d{1,2}):(\d{2})$/)
@@ -168,9 +227,10 @@ BarWidget {
     var repeat = Number(repeatValue || 0)
     var monthDay = Number(monthDayValue || 0)
     var intervalDays = Number(intervalValue || 0)
+    var intervalStart = draftMode === "interval" ? parseStartDate(startDateValue) : null
     if (!Number.isInteger(repeat) || repeat < 0 || repeat > 10080
         || (draftMode === "monthly" && (!Number.isInteger(monthDay) || monthDay < 1 || monthDay > 31))
-        || (draftMode === "interval" && (!Number.isInteger(intervalDays) || intervalDays < 1 || intervalDays > 3650))) {
+        || (draftMode === "interval" && (!Number.isInteger(intervalDays) || intervalDays < 1 || intervalDays > 3650 || !intervalStart))) {
       formErrorText = strings.t("error.schedule")
       return false
     }
@@ -181,13 +241,16 @@ BarWidget {
       days: (draftMode === "weekly" ? [draftWeeklyDay] : draftDays.slice()).sort(function(a, b) { return a - b }),
       monthDay: monthDay,
       intervalDays: intervalDays,
+      startDate: intervalStart ? dateInput(intervalStart) : "",
       hour: Number(time[1]),
       minute: Number(time[2]),
       repeatMinutes: repeat,
       dueAt: 0,
       lastNotifiedAt: 0
     }
-    task.dueAt = nextDate(task, Date.now())
+    task.dueAt = draftMode === "interval"
+      ? firstIntervalDate(startDateValue, intervalDays, task.hour, task.minute, Date.now())
+      : nextDate(task, Date.now())
     if (!task.dueAt) {
       formErrorText = strings.t("error.nextDate")
       return false
@@ -296,7 +359,7 @@ BarWidget {
     content: PanelKeyCatcher {
       anchors.fill: parent
       implicitHeight: contentColumn.implicitHeight
-      blocked: titleInput.activeFocus || timeInput.activeFocus || repeatInput.activeFocus || monthDayInput.activeFocus || intervalInput.activeFocus
+      blocked: titleInput.activeFocus || timeInput.activeFocus || repeatInput.activeFocus || monthDayInput.activeFocus || intervalInput.activeFocus || startDateInput.activeFocus
       onCloseRequested: root.close()
 
       Flickable {
@@ -335,7 +398,11 @@ BarWidget {
               foreground: Commons.Color.popups.text
               focusable: true
               bordered: true
-              onClicked: { root.formErrorText = ""; root.viewMode = "add" }
+              onClicked: {
+                root.formErrorText = ""
+                startDateInput.text = root.currentDateInput()
+                root.viewMode = "add"
+              }
             }
             PanelActionButton {
               id: backButton
@@ -371,7 +438,7 @@ BarWidget {
                 required property var modelData
                 width: listPage.width
                 implicitHeight: taskRow.implicitHeight + Style.space(16)
-                color: "transparent"
+                color: Commons.Color.popups.background
                 borderSpec: Border.controlSpec("normal", Commons.Color.popups.text, Commons.Color.accent)
 
                 Row {
@@ -400,6 +467,15 @@ BarWidget {
                       font.family: Style.font.family
                       font.pixelSize: Style.font.bodySmall
                     }
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: root.nextDueLabel(Number(modelData.dueAt))
+                      color: Number(modelData.dueAt) <= root.clockNow ? Commons.Color.accent : Qt.darker(Commons.Color.popups.text, 1.2)
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                    }
                   }
                   PanelActionButton {
                     id: doneButton
@@ -413,7 +489,7 @@ BarWidget {
                   PanelActionButton {
                     id: deleteButton
                     anchors.verticalCenter: parent.verticalCenter
-                    iconText: "\uf2ed"
+                    iconText: "×"
                     tooltipText: strings.t("task.delete")
                     foreground: Commons.Color.popups.text
                     enabled: !root.stateError
@@ -540,6 +616,15 @@ BarWidget {
             }
 
             TextField {
+              id: startDateInput
+              visible: root.draftMode === "interval"
+              width: parent.width
+              placeholderText: strings.t("schedule.startDate")
+              text: root.currentDateInput()
+              maximumLength: 10
+            }
+
+            TextField {
               id: monthDayInput
               visible: root.draftMode === "monthly"
               width: parent.width
@@ -591,7 +676,7 @@ BarWidget {
               enabled: root.stateReady && !root.stateError
               bordered: true
               onClicked: {
-                if (root.createTask(titleInput.text, timeInput.text, repeatInput.text, monthDayInput.text, intervalInput.text)) {
+                if (root.createTask(titleInput.text, timeInput.text, repeatInput.text, monthDayInput.text, intervalInput.text, startDateInput.text)) {
                   titleInput.text = ""
                   root.viewMode = "list"
                 }
