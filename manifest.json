@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.mkry93.task-reminders",
+  "name": "Recurring Tasks",
+  "version": "1.0.0",
+  "author": "mkry93",
+  "license": "MIT",
+  "description": "Recurring task reminders with catch-up and optional repeat notifications.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Recurring Tasks",
+    "description": "Tasks that stay due until completed.",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}
