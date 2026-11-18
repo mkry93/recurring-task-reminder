@@ -33,6 +33,7 @@ BarWidget {
   property string transferMessage: ""
   property string transferPayload: ""
   property bool exportStarted: false
+  signal editTaskRequested(var task)
   readonly property string stateFilePath: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/recurring-task-reminder/tasks.json"
   readonly property int dueCount: tasks.filter(function(task) { return Number(task.dueAt) <= root.clockNow }).length
 
@@ -424,12 +425,6 @@ BarWidget {
     draftDays = task.days.slice()
     draftWeeklyDay = task.mode === "weekly" ? Number(task.days[0]) : -1
     formErrorText = ""
-    titleInput.text = task.title
-    timeInput.text = String(task.hour).padStart(2, "0") + ":" + String(task.minute).padStart(2, "0")
-    repeatInput.text = String(task.repeatMinutes)
-    monthDayInput.text = String(task.monthDay)
-    intervalInput.text = String(task.intervalDays)
-    startDateInput.text = task.startDate || dateInput(new Date(Number(task.dueAt)))
     viewMode = "add"
   }
 
@@ -596,6 +591,19 @@ BarWidget {
       implicitHeight: contentColumn.implicitHeight
       blocked: titleInput.activeFocus || timeInput.activeFocus || repeatInput.activeFocus || monthDayInput.activeFocus || intervalInput.activeFocus || startDateInput.activeFocus
       onCloseRequested: root.close()
+
+      Connections {
+        target: root
+        function onEditTaskRequested(task) {
+          root.editTask(task)
+          titleInput.text = task.title
+          timeInput.text = String(task.hour).padStart(2, "0") + ":" + String(task.minute).padStart(2, "0")
+          repeatInput.text = String(task.repeatMinutes)
+          monthDayInput.text = String(task.monthDay)
+          intervalInput.text = String(task.intervalDays)
+          startDateInput.text = task.startDate || root.dateInput(new Date(Number(task.dueAt)))
+        }
+      }
 
       Flickable {
         anchors.fill: parent
@@ -766,7 +774,7 @@ BarWidget {
                     tooltipText: strings.t("task.edit")
                     foreground: Commons.Color.popups.text
                     enabled: !root.stateError
-                    onClicked: root.editTask(modelData)
+                    onClicked: root.editTaskRequested(modelData)
                   }
                   PanelActionButton {
                     id: doneButton
